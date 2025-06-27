@@ -6,34 +6,40 @@
 EmcEspNow espNow;
 
 // Temperature sensor handle and configuration
-temperature_sensor_handle_t temp_handle = NULL;
-temperature_sensor_config_t temp_sensor = {
+temperature_sensor_handle_t tempHandle = NULL;
+temperature_sensor_config_t tempSensor = {
     .range_min = 20, // Minimum temperature range in Celsius
     .range_max = 50  // Maximum temperature range in Celsius
 };
+
+// Touch Sensor Treshold (tested on ESP32-S2)
+const uint16_t touchThreshold = 8000; // change to higher value if too sensitive
 
 // Timing variables for status LED and periodic tasks
 unsigned long slaveMillis = 0;
 unsigned long ledMillis = 0;
 
 // Temperature reading (in Celsius) from internal sensor
-float tsens_out = 0.0f;
+float tempOut = 0.0f;
 
 // === Button Pin Configuration Vectors ===
 // IMPORTANT: Do NOT include LED_BUILTIN in any of these vectors.
 // It is reserved for status indication and must not be repurposed as an input or output pin.
 
+// Touch sensor pins
+std::vector<uint8_t> buttonsTouchpins = {1, 2, 3, 4};
+
 // Digital buttons connected to GND, use INPUT_PULLUP
-std::vector<uint8_t> buttonsGndpins = {1, 2, 3, 4};
+std::vector<uint8_t> buttonsGndpins = {5, 6, 7, 8};
 
 // Digital buttons connected to VCC, use INPUT_PULLDOWN
-std::vector<uint8_t> buttonsVCCpins = {5, 6, 7, 8};
+std::vector<uint8_t> buttonsVCCpins = {9, 10, 11, 12};
 
 // Column pins for matrix buttons, read as inputs with pull-ups
-std::vector<uint8_t> buttonsColpins = {9, 10, 11, 12};
+std::vector<uint8_t> buttonsColpins = {13, 14, 16, 17};
 
 // Row pins for matrix buttons, driven low during scan
-std::vector<uint8_t> buttonsRowpins = {13, 14, 16, 17};
+std::vector<uint8_t> buttonsRowpins = {18, 21, 33, 34};
 
 void setup()
 {
@@ -46,8 +52,8 @@ void setup()
   espNow.begin(false); // false = Slave
 
   // Initialize internal temperature sensor
-  ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor, &temp_handle));
-  ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
+  ESP_ERROR_CHECK(temperature_sensor_install(&tempSensor, &tempHandle));
+  ESP_ERROR_CHECK(temperature_sensor_enable(tempHandle));
 
   // Configure input pins for GND-driven buttons
   for (uint8_t pin : buttonsGndpins)
@@ -82,7 +88,7 @@ void loop()
 {
   // ============ Temperature Reading ============
   // Read the internal temperature sensor in Celsius
-  ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
+  ESP_ERROR_CHECK(temperature_sensor_get_celsius(tempHandle, &tempOut));
 
   // ============ Prepare Button Data ============
   // Clear previous button states
@@ -105,6 +111,27 @@ void loop()
       totalBits++;
     }
   };
+
+  // Read TOUCH sensor
+  for (uint8_t pin : buttonsTouchpins)
+  {
+    bool touched = (touchRead(pin) > touchThreshold);
+    if (touched)
+    {
+      uint8_t byteIndex = totalBits / 8;
+      uint8_t bitIndex = totalBits % 8;
+      bitWrite(espNow.slaveSendData.button_data[byteIndex], bitIndex, 1);
+      totalBits++;
+    }
+    else
+    {
+      // Optional: Explicitly set bit to 0 if needed
+      uint8_t byteIndex = totalBits / 8;
+      uint8_t bitIndex = totalBits % 8;
+      bitWrite(espNow.slaveSendData.button_data[byteIndex], bitIndex, 0);
+      totalBits++;
+    }
+  }
 
   // Read GND-referenced buttons (active-low)
   writeBits(buttonsGndpins, true);
@@ -135,7 +162,7 @@ void loop()
 
   if (espNow.peers.size() >= 2)
   {
-    if (tsens_out >= 80.0)
+    if (tempOut >= 80.0)
     {
       // Critical temperature (blink every 50ms)
       if (millis() - ledMillis > 50)
@@ -144,7 +171,7 @@ void loop()
         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
       }
     }
-    else if (tsens_out >= 70.0)
+    else if (tempOut >= 70.0)
     {
       // Over-temperature warning (blink every 100ms)
       if (millis() - ledMillis > 100)
@@ -168,20 +195,19 @@ void loop()
     }
   }
 
-  // Contoh memproses data dari master
+  // Example processing data from master
   if (memcmp(&espNow.masterCmdData, &espNow.lastmasterCmdData, sizeof(espNow.masterCmdData)) != 0)
-  { // Jika ada data baru
+  { // new data
 
-
-    Serial.printf("Main Id: %d | Sub Id: %d | Index1: %d | Index2: %d | Float: %f | Int: %d \n", 
-      espNow.masterCmdData.mainId, espNow.masterCmdData.subId, espNow.masterCmdData.index1, espNow.masterCmdData.index2, espNow.masterCmdData.value, espNow.masterCmdData.valueInt);
+    Serial.printf("Main Id: %d | Sub Id: %d | Index1: %d | Index2: %d | Float: %f | Int: %d \n",
+                  espNow.masterCmdData.mainId, espNow.masterCmdData.subId, espNow.masterCmdData.index1, espNow.masterCmdData.index2, espNow.masterCmdData.value, espNow.masterCmdData.valueInt);
 
     memcpy(&espNow.lastmasterCmdData, &espNow.masterCmdData, sizeof(espNow.masterCmdData));
 
-    // Contoh aksi berdasarkan data master
+    // Example action based on master data
     // digitalWrite(LED_PIN, espNow.espnowRecvData.button_data[0]);
 
-    // Reset data yang diterima setelah diproses
+    // Reset received data after processing
     // memset(&espNow.espnowRecvData, 0, sizeof(espNow.espnowRecvData));
   }
 
@@ -192,7 +218,13 @@ void loop()
   {
     debugMillis = millis();
 
-    Serial.printf("Temp: %.2f C | Peers: %d\n", tsens_out, espNow.peers.size());
+    // Touch sensor debugging
+    // for (uint8_t pin : buttonsTouchpins)
+    // {
+    //   Serial.printf("Touch pin %d: %d\n", pin, touchRead(pin));
+    // }
+
+    Serial.printf("Temp: %.2f C | Peers: %d\n", tempOut, espNow.peers.size());
     Serial.print("Button bits: ");
     for (int i = 0; i < sizeof(espNow.slaveSendData.button_data); i++)
     {

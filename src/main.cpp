@@ -1,6 +1,7 @@
 
 #include "EmcEspNow.h"
 #include "driver/temperature_sensor.h"
+#include "esp_sleep.h"
 
 // Instance of the ESP-NOW communication handler (slave mode)
 EmcEspNow espNow;
@@ -18,9 +19,14 @@ const uint16_t touchThreshold = 8000; // change to higher value if too sensitive
 // Timing variables for status LED and periodic tasks
 unsigned long slaveMillis = 0;
 unsigned long ledMillis = 0;
+unsigned long lastActivityMillis = 0; // Track last button activity
 
 // Temperature reading (in Celsius) from internal sensor
 float tempOut = 0.0f;
+
+// Power management settings
+const unsigned long INACTIVITY_TIMEOUT = 30000; // 30 seconds of inactivity before sleep
+bool lowPowerMode = false;
 
 // === Button Pin Configuration Vectors ===
 // IMPORTANT: Do NOT include LED_BUILTIN in any of these vectors.
@@ -41,9 +47,72 @@ std::vector<uint8_t> buttonsColpins = {13, 14, 16, 17};
 // Row pins for matrix buttons, driven low during scan
 std::vector<uint8_t> buttonsRowpins = {18, 21, 33, 34};
 
+// Function to prepare wakeup sources
+void prepareWakeupSources()
+{
+  // Configure touch pins as wakeup sources
+  for (uint8_t pin : buttonsTouchpins)
+  {
+    esp_sleep_enable_touchpad_wakeup();
+    touchAttachInterrupt(pin, []() {}, touchThreshold);
+  }
+
+  // Configure digital buttons as wakeup sources
+  for (uint8_t pin : buttonsGndpins)
+  {
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)pin, LOW);
+  }
+
+  for (uint8_t pin : buttonsVCCpins)
+  {
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)pin, HIGH);
+  }
+
+  // Note: Matrix buttons are more complex to wake from - consider using only direct buttons for wakeup
+}
+
+// Function to enter low power mode
+void enterLowPowerMode()
+{
+  Serial.println("Entering low power mode...");
+  digitalWrite(LED_BUILTIN, LOW); // Turn off LED
+
+  // Prepare wakeup sources
+  prepareWakeupSources();
+
+  // Disable temperature sensor
+  if (tempHandle)
+  {
+    temperature_sensor_disable(tempHandle);
+  }
+
+  // Disable WiFi and ESP-NOW
+  espNow.end();
+
+  // Configure deep sleep
+  esp_deep_sleep_start();
+}
+
 void setup()
 {
   Serial.begin(115200);
+
+  // Check wakeup reason
+  esp_sleep_wakeup_cause_t wakeupReason = esp_sleep_get_wakeup_cause();
+  if (wakeupReason != ESP_SLEEP_WAKEUP_UNDEFINED)
+  {
+    // We woke from sleep - quick initialization
+    lowPowerMode = false;
+    lastActivityMillis = millis();
+
+    // Minimal reinitialization
+    pinMode(LED_BUILTIN, OUTPUT);
+
+    // Reinitialize ESP-NOW in Slave mode
+    espNow.begin(false); // false = Slave
+
+    return;
+  }
 
   // Configure built-in LED for status indication
   pinMode(LED_BUILTIN, OUTPUT);
@@ -82,13 +151,44 @@ void setup()
     // WARNING: Do NOT include LED_BUILTIN in this vector to avoid LED malfunction.
     pinMode(pin, INPUT_PULLUP);
   }
+
+  lastActivityMillis = millis();
+}
+
+void checkButtonActivity()
+{
+  static uint8_t lastButtonState[sizeof(espNow.slaveSendData.button_data)] = {0};
+
+  if (memcmp(lastButtonState, espNow.slaveSendData.button_data, sizeof(lastButtonState)))
+  {
+    // Button state changed - update last activity time
+    lastActivityMillis = millis();
+    memcpy(lastButtonState, espNow.slaveSendData.button_data, sizeof(lastButtonState));
+
+    if (lowPowerMode)
+    {
+      // Exiting low power mode
+      lowPowerMode = false;
+      Serial.println("Exiting low power mode");
+    }
+  }
 }
 
 void loop()
 {
+  // Check if we should enter low power mode
+  if (!lowPowerMode && (millis() - lastActivityMillis > INACTIVITY_TIMEOUT))
+  {
+    lowPowerMode = true;
+    enterLowPowerMode();
+    return; // This line won't be reached if deep sleep is entered
+  }
+
   // ============ Temperature Reading ============
   // Read the internal temperature sensor in Celsius
-  ESP_ERROR_CHECK(temperature_sensor_get_celsius(tempHandle, &tempOut));
+  // Only read temperature if not in low power mode
+  if (!lowPowerMode)
+    ESP_ERROR_CHECK(temperature_sensor_get_celsius(tempHandle, &tempOut));
 
   // ============ Prepare Button Data ============
   // Clear previous button states
@@ -116,22 +216,32 @@ void loop()
   for (uint8_t pin : buttonsTouchpins)
   {
     bool touched = (touchRead(pin) > touchThreshold);
-    if (touched)
-    {
-      uint8_t byteIndex = totalBits / 8;
-      uint8_t bitIndex = totalBits % 8;
-      bitWrite(espNow.slaveSendData.button_data[byteIndex], bitIndex, 1);
-      totalBits++;
-    }
-    else
-    {
-      // Optional: Explicitly set bit to 0 if needed
-      uint8_t byteIndex = totalBits / 8;
-      uint8_t bitIndex = totalBits % 8;
-      bitWrite(espNow.slaveSendData.button_data[byteIndex], bitIndex, 0);
-      totalBits++;
-    }
+    uint8_t byteIndex = totalBits / 8;
+    uint8_t bitIndex = totalBits % 8;
+    bitWrite(espNow.slaveSendData.button_data[byteIndex], bitIndex, touched);
+    totalBits++;
   }
+
+  // // Read TOUCH sensor
+  // for (uint8_t pin : buttonsTouchpins)
+  // {
+  //   bool touched = (touchRead(pin) > touchThreshold);
+  //   if (touched)
+  //   {
+  //     uint8_t byteIndex = totalBits / 8;
+  //     uint8_t bitIndex = totalBits % 8;
+  //     bitWrite(espNow.slaveSendData.button_data[byteIndex], bitIndex, 1);
+  //     totalBits++;
+  //   }
+  //   else
+  //   {
+  //     // Optional: Explicitly set bit to 0 if needed
+  //     uint8_t byteIndex = totalBits / 8;
+  //     uint8_t bitIndex = totalBits % 8;
+  //     bitWrite(espNow.slaveSendData.button_data[byteIndex], bitIndex, 0);
+  //     totalBits++;
+  //   }
+  // }
 
   // Read GND-referenced buttons (active-low)
   writeBits(buttonsGndpins, true);
@@ -149,6 +259,9 @@ void loop()
     if (totalBits >= sizeof(espNow.slaveSendData.button_data) * 8)
       break; // Stop if buffer is full
   }
+
+  // Check for button activity
+  checkButtonActivity();
 
   // ============ ESP-NOW Transmission ============
   // Send updated button data if changed

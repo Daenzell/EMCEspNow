@@ -85,7 +85,7 @@ unsigned long lastActivityMillis = 0;
 // Temperature reading
 float tempOut = 0.0f;
 
-// Power management (opsional, masih dikomentari)
+// Power management (optional)
 const unsigned long INACTIVITY_TIMEOUT = 30000;
 bool lowPowerMode = false;
 
@@ -334,7 +334,7 @@ void loop()
   vTaskDelay(pdMS_TO_TICKS(1000)); // Sleep to reduce CPU usage, tasks will handle the work
 }
 
-// =========== 1kHz Task: Read Inputs, Update States, Prepare Data ============
+// =========== 1kHz Task: Read Inputs, Update States ============
 
 void task1kHz(void *pvParameters)
 {
@@ -380,7 +380,7 @@ void task1kHz(void *pvParameters)
   }
 }
 
-// =========== 100Hz Task: Handle ESP-NOW Communication, Timeouts, etc. ============
+// =========== 100Hz Task: Handle ESP-NOW Communication, Timeouts, Temperature etc. ============
 void task100Hz(void *pvParameters)
 {
   while (true)
@@ -440,7 +440,7 @@ void task100Hz(void *pvParameters)
 
     // ============ Status LED Behavior ============
     // LED_BUILTIN usage:
-    // - ON  : Successfully connected to master (peer list size ≥ 2)
+    // - ON  : Successfully connected to master 
     // - BLINK FAST : Over-temperature warning (≥ 80°C)
     // - OFF : Not connected or normal temperature
 
@@ -510,7 +510,7 @@ void task50Hz(void *pvParameters)
     {
       debugMillis = millis();
       Serial.printf("Temp: %.2f C | Connected to master: %s | Wifi Channel: %d\n",
-                    tempOut, espNow.isMasterConnected() ? "YES" : "NO", WiFi.channel());
+                    tempOut, espNow.isMasterConnected() ? "YES" : "NO", espNow.getWiFiChannel());
       Serial.print("Button bits: ");
       for (int i = 0; i < sizeof(espNow.slaveSendData.button_data); i++)
       {

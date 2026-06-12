@@ -86,7 +86,10 @@ unsigned long lastActivityMillis = 0;
 float tempOut = 0.0f;
 
 // Power management (optional)
-const unsigned long INACTIVITY_TIMEOUT = 30000;
+// Choose an inactivity timeout that makes sense for your use case. For example, 5 minutes (300000 ms) is a common choice for user-friendly behavior while still saving power.
+// #define INACTIVITY_TIMEOUT_MS 30000   // 30 seconds (battery friendly but may be too aggressive for some users)
+#define INACTIVITY_TIMEOUT_MS 300000     // 5 minutes (user friendly)
+const unsigned long INACTIVITY_TIMEOUT = INACTIVITY_TIMEOUT_MS;
 bool lowPowerMode = false;
 
 // === Button Pin Configuration Vectors ===
@@ -99,83 +102,11 @@ std::vector<uint8_t> buttonsVCCpins = {9, 10, 11, 12};
 std::vector<uint8_t> buttonsColpins = {13, 14, 16, 17};
 std::vector<uint8_t> buttonsRowpins = {18, 21, 33, 34};
 
-// === Debounce Structure ===
-struct ButtonState
-{
-  bool rawState;           // Raw read from pin/touch
-  bool stableState;        // Debounced state
-  bool lastStableState;    // Previous stable state (for edge detection)
-  uint8_t debounceCounter; // Counter for debounce
-  bool pressed;            // True for one cycle on press
-  bool released;           // True for one cycle on release
-};
-
-// Vectors to store the state of each pin
-std::vector<ButtonState> touchStates;
-std::vector<ButtonState> gndStates;
-std::vector<ButtonState> vccStates;
-std::vector<ButtonState> colStates;
-
-// Debounce threshold (how many times the reading should stabilize)
-const uint8_t DEBOUNCE_THRESHOLD = 5;
-
-// Debounce update function
-void updateButtonState(ButtonState &state, bool raw)
-{
-  state.rawState = raw;
-  if (state.rawState == state.stableState)
-  {
-    // Same as stable, reset counter
-    state.debounceCounter = 0;
-  }
-  else
-  {
-    // Different, increment counter
-    if (state.debounceCounter < DEBOUNCE_THRESHOLD)
-    {
-      state.debounceCounter++;
-    }
-    if (state.debounceCounter >= DEBOUNCE_THRESHOLD)
-    {
-      // Change stable state
-      state.lastStableState = state.stableState;
-      state.stableState = state.rawState;
-      // Detect edges
-      state.pressed = (state.stableState == true && state.lastStableState == false);
-      state.released = (state.stableState == false && state.lastStableState == true);
-      state.debounceCounter = 0;
-    }
-  }
-}
-
-// Function to initialize vector states
-void initButtonStates()
-{
-  // Touch
-  touchStates.resize(buttonsTouchpins.size());
-  for (auto &s : touchStates)
-  {
-    s = ButtonState{false, false, false, 0, false, false};
-  }
-  // GND
-  gndStates.resize(buttonsGndpins.size());
-  for (auto &s : gndStates)
-  {
-    s = ButtonState{false, false, false, 0, false, false};
-  }
-  // VCC
-  vccStates.resize(buttonsVCCpins.size());
-  for (auto &s : vccStates)
-  {
-    s = ButtonState{false, false, false, 0, false, false};
-  }
-  // Columns (matrix)
-  colStates.resize(buttonsColpins.size());
-  for (auto &s : colStates)
-  {
-    s = ButtonState{false, false, false, 0, false, false};
-  }
-}
+// Raw data vectors
+std::vector<uint8_t> touchRaw;
+std::vector<uint8_t> gndRaw;
+std::vector<uint8_t> vccRaw;
+std::vector<std::vector<uint8_t>> matrixRaw;
 
 // Optional: Function to prepare wakeup sources for low power mode
 void prepareWakeupSources()
@@ -234,10 +165,6 @@ void checkButtonActivity()
   }
 }
 
-// Global buffer and mutex for button data (if needed for cross-task access)
-uint8_t debouncedBits[sizeof(slave_data_t::button_data)] = {0};
-SemaphoreHandle_t dataMutex = NULL;
-
 void setup()
 {
   Serial.begin(115200);
@@ -289,8 +216,14 @@ void setup()
     pinMode(pin, INPUT_PULLUP);
   }
 
-  // Initialize debounce states
-  initButtonStates();
+  touchRaw.resize(buttonsTouchpins.size(), 0);
+  gndRaw.resize(buttonsGndpins.size(), 0);
+  vccRaw.resize(buttonsVCCpins.size(), 0);
+  matrixRaw.resize(buttonsRowpins.size());
+  for (auto &row : matrixRaw)
+  {
+    row.resize(buttonsColpins.size(), 0);
+  }
 
   lastActivityMillis = millis();
 
@@ -321,8 +254,6 @@ void setup()
   xTaskCreatePinnedToCore(task100Hz, "Task100Hz", 4096, NULL, 3, &task100HzHandle, 0);
   xTaskCreatePinnedToCore(task50Hz, "Task50Hz", 4096, NULL, 2, &task50HzHandle, 0);
 
-  // Button mutex
-  dataMutex = xSemaphoreCreateMutex();
   // === Start Timer ===
   ESP_ERROR_CHECK(gptimer_start(loopTimer));
 }
@@ -343,39 +274,33 @@ void task1kHz(void *pvParameters)
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // Wait for notification from timer ISR
                                              // 1kHz tasks can be placed here if needed
 
-    // === Update all button states with debounce ===
-
     // Touch buttons (raw = touched > threshold)
     for (size_t i = 0; i < buttonsTouchpins.size(); i++)
     {
-      bool touched = (touchRead(buttonsTouchpins[i]) > touchThreshold);
-      updateButtonState(touchStates[i], touched);
+      touchRaw[i] = (touchRead(buttonsTouchpins[i]) > touchThreshold);
     }
 
     // GND buttons (active low, so raw = !digitalRead)
     for (size_t i = 0; i < buttonsGndpins.size(); i++)
     {
-      bool raw = !digitalRead(buttonsGndpins[i]);
-      updateButtonState(gndStates[i], raw);
+      gndRaw[i] = !digitalRead(buttonsGndpins[i]);
     }
 
     // VCC buttons (active high)
     for (size_t i = 0; i < buttonsVCCpins.size(); i++)
     {
-      bool raw = digitalRead(buttonsVCCpins[i]);
-      updateButtonState(vccStates[i], raw);
+      vccRaw[i] = digitalRead(buttonsVCCpins[i]);
     }
 
     // Matrix scan with debounce
-    for (uint8_t rowPin : buttonsRowpins)
+    for (size_t r = 0; r < buttonsRowpins.size(); r++)
     {
-      digitalWrite(rowPin, LOW);
-      for (size_t colIdx = 0; colIdx < buttonsColpins.size(); colIdx++)
+      digitalWrite(buttonsRowpins[r], LOW);
+      for (size_t c = 0; c < buttonsColpins.size(); c++)
       {
-        bool raw = !digitalRead(buttonsColpins[colIdx]);
-        updateButtonState(colStates[colIdx], raw);
+        matrixRaw[r][c] = !digitalRead(buttonsColpins[c]);
       }
-      digitalWrite(rowPin, HIGH);
+      digitalWrite(buttonsRowpins[r], HIGH);
     }
   }
 }
@@ -405,31 +330,28 @@ void task100Hz(void *pvParameters)
     }
 
     // ============ Prepare Button Data for ESP-NOW ============
-    uint8_t tempBuffer[sizeof(debouncedBits)];
-    memset(tempBuffer, 0, sizeof(tempBuffer));
+    // Pack raw button states
+    memset(espNow.slaveSendData.button_data, 0, sizeof(espNow.slaveSendData.button_data));
     uint16_t totalBits = 0;
     auto writeBit = [&](bool bit)
     {
-      if (totalBits >= sizeof(tempBuffer) * 8)
+      if (totalBits >= sizeof(espNow.slaveSendData.button_data) * 8)
         return;
       uint8_t byteIdx = totalBits / 8;
       uint8_t bitIdx = totalBits % 8;
-      bitWrite(tempBuffer[byteIdx], bitIdx, bit);
+      bitWrite(espNow.slaveSendData.button_data[byteIdx], bitIdx, bit);
       totalBits++;
     };
-    for (auto &s : touchStates)
-      writeBit(s.stableState);
-    for (auto &s : gndStates)
-      writeBit(s.stableState);
-    for (auto &s : vccStates)
-      writeBit(s.stableState);
-    for (auto &s : colStates)
-      writeBit(s.stableState);
 
-    // Copy debounced bits to global buffer (if needed for other tasks)
-    if (dataMutex) xSemaphoreTake(dataMutex, portMAX_DELAY);
-    memcpy(espNow.slaveSendData.button_data, tempBuffer, sizeof(espNow.slaveSendData.button_data));
-    if (dataMutex) xSemaphoreGive(dataMutex);
+     // Touch
+    for (auto v : touchRaw) writeBit(v);
+    // GND
+    for (auto v : gndRaw) writeBit(v);
+    // VCC
+    for (auto v : vccRaw) writeBit(v);
+    // Matrix (2D)
+    for (const auto &row : matrixRaw)
+        for (auto v : row) writeBit(v);
 
     // Check for button activity to reset inactivity timer
     checkButtonActivity();
@@ -440,7 +362,7 @@ void task100Hz(void *pvParameters)
 
     // ============ Status LED Behavior ============
     // LED_BUILTIN usage:
-    // - ON  : Successfully connected to master 
+    // - ON  : Successfully connected to master
     // - BLINK FAST : Over-temperature warning (≥ 80°C)
     // - OFF : Not connected or normal temperature
 

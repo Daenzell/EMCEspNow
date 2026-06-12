@@ -273,13 +273,13 @@ void EmcEspNow::update()
     if (isMaster)
     {
         // Send command to all active slaves
-        for (int i = 0; i < MAX_SLAVES; i++)
-        {
-            if (slaves[i].active)
-            {
-                sendUnicast(slaves[i].mac, (uint8_t *)&masterCmdData, sizeof(master_cmd_t));
-            }
-        }
+        // for (int i = 0; i < MAX_SLAVES; i++)
+        // {
+        //     if (slaves[i].active)
+        //     {
+        //         sendUnicast(slaves[i].mac, (uint8_t *)&masterCmdData, sizeof(master_cmd_t));
+        //     }
+        // }
         // Check slave timeout
         checkSlaveTimeouts();
     }

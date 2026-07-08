@@ -15,7 +15,16 @@ EmcEspNow *EmcEspNow::instance = nullptr;
 void EmcEspNow::begin(bool isMaster)
 {
     WiFi.mode(WIFI_STA);
-    WiFi.setChannel(ESPNOW_WIFI_CHANNEL);
+    if (isMaster)
+    {
+        // Master: tetap di channel yang sama atau ikuti router
+        WiFi.setChannel(ESPNOW_WIFI_CHANNEL);
+    }
+    else
+    {
+        currentChannel = 1;
+        WiFi.setChannel(currentChannel);
+    }
 
     if (esp_now_init() != ESP_OK)
     {
@@ -35,6 +44,7 @@ void EmcEspNow::begin(bool isMaster)
     if (!isMaster)
     {
         addPeer(BROADCAST_MAC_SLAVE);
+        sendBroadcast();
     }
     else
     {
@@ -91,7 +101,7 @@ void EmcEspNow::addPeer(const uint8_t *peer_addr)
     esp_now_peer_info_t peer;
     memset(&peer, 0, sizeof(esp_now_peer_info_t));
     memcpy(peer.peer_addr, peer_addr, 6);
-    peer.channel = ESPNOW_WIFI_CHANNEL;
+    peer.channel = WiFi.channel();
     peer.encrypt = false;
 
     if (esp_now_add_peer(&peer) == ESP_OK)
@@ -142,6 +152,7 @@ void EmcEspNow::removePeer(const uint8_t *peer_mac)
         if (memcmp(masterMac, peer_mac, 6) == 0)
         {
             masterConnected = false;
+            currentChannel = 1;
             memset(masterMac, 0, 6);
             lastMasterRxTime = 0;
         }
@@ -217,17 +228,23 @@ void EmcEspNow::updateSlave(const uint8_t *mac)
     log_w("Maximum slaves reached, cannot add " MACSTR, MAC2STR(mac));
 }
 
-int EmcEspNow::getConnectedSlaveCount() const {
-    if (!isMaster) return 0;
+int EmcEspNow::getConnectedSlaveCount() const
+{
+    if (!isMaster)
+        return 0;
     int count = 0;
-    for (int i = 0; i < MAX_SLAVES; i++) {
-        if (slaves[i].active) count++;
+    for (int i = 0; i < MAX_SLAVES; i++)
+    {
+        if (slaves[i].active)
+            count++;
     }
     return count;
 }
 
-const uint8_t* EmcEspNow::getSlaveMac(int index) const {
-    if (!isMaster || index < 0 || index >= MAX_SLAVES) return nullptr;
+const uint8_t *EmcEspNow::getSlaveMac(int index) const
+{
+    if (!isMaster || index < 0 || index >= MAX_SLAVES)
+        return nullptr;
     return slaves[index].active ? slaves[index].mac : nullptr;
 }
 
@@ -261,14 +278,17 @@ void EmcEspNow::checkSlaveTimeouts()
 
 bool EmcEspNow::isSlaveConnected(uint8_t index) const
 {
-    if (!isMaster) return false;
-    if (index >= MAX_SLAVES) return false;
+    if (!isMaster)
+        return false;
+    if (index >= MAX_SLAVES)
+        return false;
     return slaves[index].active;
 }
 
 void EmcEspNow::update()
 {
-    if (!instance) return;
+    if (!instance)
+        return;
 
     if (isMaster)
     {
@@ -303,10 +323,46 @@ void EmcEspNow::update()
         else
         {
             // If master is not connected, send broadcast periodically to find the master
-            if (millis() - broadcastMillis > 1000)
+            if (millis() - broadcastMillis > 300)
             {
+                currentChannel++;
+                if (currentChannel > 13)
+                {
+                    currentChannel = 1;
+                }
+                log_d("Scanning channel %d", currentChannel);
+                // Unregister callbacks
+                esp_now_unregister_send_cb();
+                esp_now_unregister_recv_cb();
+
+                // Deinit ESP-NOW
+                esp_now_deinit();
+
+                delay(10);
+                // Switch channel
+                WiFi.setChannel(currentChannel);
+
+                // Reinit ESP-NOW
+                if (esp_now_init() == ESP_OK)
+                {
+                    esp_now_register_send_cb(onSend);
+                    esp_now_register_recv_cb([](const esp_now_recv_info_t *recv_info, const uint8_t *data, int len)
+                                             { if(instance) instance->onReceive(recv_info, data, len); });
+
+                    // Hapus semua peer lama
+                    if (esp_now_is_peer_exist(BROADCAST_MAC_SLAVE))
+                    {
+                        esp_now_del_peer(BROADCAST_MAC_SLAVE);
+                    }
+
+                    // Add broadcast peer on new channel
+                    addPeer(BROADCAST_MAC_SLAVE);
+
+                    // Send broadcast on new channel
+                    sendBroadcast();
+                }
+
                 broadcastMillis = millis();
-                sendBroadcast();
             }
         }
 

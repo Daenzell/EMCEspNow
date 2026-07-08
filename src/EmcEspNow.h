@@ -11,10 +11,11 @@
 #include <esp_now.h>
 #include <WiFi.h>
 
-#define ESPNOW_WIFI_CHANNEL 6
+#define ESPNOW_WIFI_CHANNEL 11
 #define MAX_SLAVES 5               // Maximum number of slaves that can be connected to the master
 #define PEER_TIMEOUT_MS 3000       // Peer detection timeout (3 seconds)
 #define HEARTBEAT_INTERVAL_MS 1000 // Heartbeat interval (1 second)
+
 
 // Data structure that the slave sends to the master
 typedef struct
@@ -70,7 +71,6 @@ public:
 
     int getConnectedSlaveCount() const;
     const uint8_t *getSlaveMac(int index) const;
-
 private:
     // For slave: stores master information
     uint8_t masterMac[6] = {0};
@@ -111,6 +111,10 @@ private:
     void checkSlaveTimeouts();
     // Send heartbeat if needed (for slave to master)
     void sendHeartbeatIfNeeded();
+
+    // Channel scanning variables
+    uint8_t currentChannel = 1;
+    
 };
 
 #endif
